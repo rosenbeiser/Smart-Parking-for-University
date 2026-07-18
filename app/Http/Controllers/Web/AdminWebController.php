@@ -5,7 +5,6 @@ namespace App\Http\Controllers\Web;
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\Document;
-use App\Models\Payment;
 use App\Models\ParkingApplication;
 use App\Models\ParkingTicket;
 use App\Models\Semester;
@@ -47,13 +46,6 @@ class AdminWebController extends Controller
             ->limit(8)
             ->get();
 
-        $pendingPayments = Payment::query()
-            ->with(['user:id,name,email', 'application:id,applicant_name'])
-            ->where('status', 'pending')
-            ->orderByDesc('created_at')
-            ->limit(5)
-            ->get();
-
         $overview = [
             'total_applications'   => $applications->count(),
             'pending'              => $pendingCount,
@@ -61,10 +53,9 @@ class AdminWebController extends Controller
             'rejected'             => $rejectedCount,
             'approval_rate'        => $reviewedCount > 0 ? round(($approvedCount / $reviewedCount) * 100, 1) : 0.0,
             'total_users'          => User::query()->count(),
-            'pending_payments'     => Payment::query()->where('status', 'pending')->count(),
         ];
 
-        return view('admin.dashboard', compact('overview', 'applications', 'activeSemester', 'recentAuditLogs', 'pendingPayments'));
+        return view('admin.dashboard', compact('overview', 'applications', 'activeSemester', 'recentAuditLogs'));
     }
 
     // ── Applications ──────────────────────────────────────────────────────────
@@ -75,7 +66,7 @@ class AdminWebController extends Controller
         $search = trim((string) $request->query('search', ''));
 
         $query = ParkingApplication::query()
-            ->with(['user:id,name,email,role', 'semester:id,name', 'vehicle:id,plate_number,vehicle_type', 'parkingTicket', 'payments'])
+            ->with(['user:id,name,email,role', 'semester:id,name', 'vehicle:id,plate_number,vehicle_type', 'parkingTicket'])
             ->orderByDesc('id');
 
         if ($status !== '') {
@@ -102,8 +93,6 @@ class AdminWebController extends Controller
             'vehicle:id,plate_number,vehicle_type,brand,model,color,registration_number',
             'documents:id,document_type,file_path,is_verified,created_at',
             'parkingTicket',
-            'aiAnalysis',
-            'payments',
         ]);
 
         return view('admin.applications.show', compact('application'));

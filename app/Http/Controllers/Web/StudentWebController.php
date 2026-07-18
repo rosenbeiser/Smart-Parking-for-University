@@ -3,8 +3,6 @@
 namespace App\Http\Controllers\Web;
 
 use App\Http\Controllers\Controller;
-use App\Http\Services\Ai\AiDocumentService;
-use App\Models\AiAnalysis;
 use App\Models\ApplicationDocument;
 use App\Models\Document;
 use App\Models\Notification;
@@ -20,6 +18,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\View\View;
 use Throwable;
+use Illuminate\Support\Facades\Cookie;
 
 class StudentWebController extends Controller
 {
@@ -30,15 +29,13 @@ class StudentWebController extends Controller
         'vehicle_photo'                    => 'vehicle_photo',
     ];
 
-    private const AI_REQUIRED_CAR_DOCUMENT_TYPES = ['registration', 'license'];
-
     private const RENEWAL_NOTE_PREFIX = 'Renewal Meta:';
 
     private const STUDY_SEMESTERS = [
         '1.1', '1.2', '2.1', '2.2', '3.1', '3.2', '4.1', '4.2', '5.1', '5.2',
     ];
 
-    public function __construct(private readonly AiDocumentService $aiDocumentService) {}
+    public function __construct() {}
 
     // ── Dashboard ─────────────────────────────────────────────────────────────
 
@@ -66,7 +63,10 @@ class StudentWebController extends Controller
 
         $latest = $applications->first();
 
-        return view('student.dashboard', compact('user', 'activeSemester', 'overview', 'applications', 'latest'));
+        // ── Lab 12: External API via Guzzle (Open-Meteo — free, no key) ───────
+        $weather = (new WeatherController())->getWeather();
+
+        return view('student.dashboard', compact('user', 'activeSemester', 'overview', 'applications', 'latest', 'weather'));
     }
 
     // ── Applications ──────────────────────────────────────────────────────────
@@ -85,13 +85,19 @@ class StudentWebController extends Controller
 
     // ── Apply ─────────────────────────────────────────────────────────────────
 
-    public function showApply(): View
+    public function showApply(Request $request): View
     {
         $user = Auth::user();
         $semesters = Semester::query()->where('is_active', true)->orderByDesc('start_date')->get();
         $studySemesters = self::STUDY_SEMESTERS;
         $isTeacher = $user->role === 'teacher';
-        return view('student.apply', compact('user', 'semesters', 'studySemesters', 'isTeacher'));
+
+        // ── Lab 9: Cookies — read remembered vehicle type ─────────────────────
+        // If the user has applied before, pre-fill their preferred vehicle type
+        // from the cookie so they don't have to select it again.
+        $preferredVehicleType = $request->cookie('preferred_vehicle_type');
+
+        return view('student.apply', compact('user', 'semesters', 'studySemesters', 'isTeacher', 'preferredVehicleType'));
     }
 
     public function submitApply(Request $request): RedirectResponse
@@ -126,41 +132,6 @@ class StudentWebController extends Controller
         ]);
 
         $semester = $this->resolveSubmissionSemester();
-
-        // AI verification
-        $aiResultsByField = [];
-        $rejections = [];
-
-        foreach (self::DOCUMENT_FIELD_TO_TYPE as $field => $documentType) {
-            $file   = $request->file("documents.$field");
-            $result = $this->aiDocumentService->analyse($file);
-            $aiResultsByField[$field] = [
-                'field'         => $field,
-                'document_type' => $documentType,
-                'is_car_document' => (bool) ($result['is_car_document'] ?? false),
-                'clarity'       => (string) ($result['clarity'] ?? 'unclear'),
-                'confidence'    => round((float) ($result['confidence'] ?? 0), 4),
-                'issues'        => array_values(array_map('strval', (array) ($result['issues'] ?? []))),
-                'error'         => isset($result['error']) ? (string) $result['error'] : null,
-            ];
-
-            $hasServiceError = !empty($aiResultsByField[$field]['error']);
-            $clarity         = $aiResultsByField[$field]['clarity'];
-
-            if (!$hasServiceError && $clarity === 'unclear') {
-                $rejections[] = $field;
-            }
-
-            if (!$hasServiceError && in_array($documentType, self::AI_REQUIRED_CAR_DOCUMENT_TYPES, true) && !$aiResultsByField[$field]['is_car_document']) {
-                $rejections[] = $field;
-            }
-        }
-
-        if ($rejections !== []) {
-            return back()
-                ->withInput()
-                ->withErrors(['documents' => 'One or more documents failed AI verification. Please re-upload clearer images.']);
-        }
 
         $storedPaths = [];
 
@@ -225,23 +196,16 @@ class StudentWebController extends Controller
 
             DB::commit();
 
-            // AI analysis record (non-blocking)
-            try {
-                $riskScore = $this->calculateRiskScore($aiResultsByField);
-                AiAnalysis::query()->create([
-                    'application_id'         => $application->id,
-                    'risk_score'             => $riskScore,
-                    'renewal_recommendation' => false,
-                    'raw_response'           => $aiResultsByField,
-                ]);
-            } catch (Throwable $e) {
-                Log::warning('AI analysis store failed', ['message' => $e->getMessage()]);
-            }
-
             NotificationPublisher::createForUser($user->id, 'Application submitted', "Your parking application #{$application->id} has been submitted and is now pending review.");
             NotificationPublisher::createForRole('admin', 'New parking application', "{$user->name} submitted parking application #{$application->id} for review.");
 
-            return redirect()->route('student.applications')->with('success', "Application #{$application->id} submitted successfully! You will be notified when reviewed.");
+            // ── Lab 9: Cookies — remember preferred vehicle type (7-day cookie) ────
+            $vehicleTypeCookie = cookie('preferred_vehicle_type', $payload['vehicle_type'], 60 * 24 * 7);
+
+            return redirect()
+                ->route('student.applications')
+                ->with('success', "Application #{$application->id} submitted successfully! You will be notified when reviewed.")
+                ->withCookie($vehicleTypeCookie);
         } catch (Throwable $e) {
             DB::rollBack();
             foreach ($storedPaths as $p) {

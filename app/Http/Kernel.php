@@ -72,5 +72,6 @@ class Kernel extends HttpKernel
         'verified'  => \Illuminate\Auth\Middleware\EnsureEmailIsVerified::class,
         'web.auth'  => \App\Http\Middleware\WebAuthenticate::class,
         'web.role'  => \App\Http\Middleware\WebRoleMiddleware::class,
+        'country'   => \App\Http\Middleware\CountryMiddleware::class,
     ];
 }
